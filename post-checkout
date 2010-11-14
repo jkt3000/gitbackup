@@ -1,0 +1,149 @@
+#!/usr/bin/env ruby
+
+# gitbackup
+# A git post-checkout script that backups and restores your rails database when you switch branches.
+# 
+# When you checkout a branch, the script will backup your rails dev db to the backup path with the timestamp and branch name.
+# Depending on if any changes were detected in the db/migrate/* files, it will restore back your db for the
+# given branch if those migrate files were modified or deleted.
+# If additions were made, it will migrate your db.
+
+require 'fileutils'
+require 'yaml'
+
+BASE_PATH   = File.dirname(__FILE__)
+BACKUP_PATH = ENV['GITBACKUP_PATH'] || File.join(File.expand_path(BASE_PATH), "../../../backups/") # defaults to <project>/.backups/
+
+@prev_sha, @curr_sha, @branch_checkout, _ = *ARGV
+
+# validate backup path exists
+def validate_backup_path  
+  if !File.exists?(backup_dir) || !File.directory?(backup_dir)
+    FileUtils.mkdir_p backup_dir
+    if !File.exists?(backup_dir) || !File.directory?(backup_dir)
+      puts "Directory #{backup_dir} does not exist. Please make sure this directory exists."
+      exit
+    end
+  end
+  puts "Backup path: #{backup_dir}."
+end
+
+# current branch from sha
+def branch_from_sha
+  branches = `git branch --contains #{@curr_sha}`.split("\n")
+  curr = branches.find {|branch| branch.match(/^\*/) }
+  curr.gsub!(/^\W*/, "")
+end
+
+# save current branch to file and return name
+def mark_current_branch
+  branch = branch_from_sha
+  File.open(marker_file, 'w') {|f| f.write(branch) }
+  branch
+end
+
+# get previous branch from marker, if exists
+def get_previous_branch
+  File.exists?(marker_file) ? File.open(marker_file).read : nil
+end
+
+# backup database
+def backup_db(name)
+  puts "Backing up db..."
+  
+  backup_name = Time.now.strftime("%Y-%m-%d-%H:%M:%S_#{name}.mysql")
+  backup_file = File.join(backup_dir, backup_name)
+  results = `mysqldump #{database['database']} -u #{database['username']} --add-drop-table > #{backup_file}`
+  
+  puts "Backed up db ==> #{backup_name}"
+end
+
+# restore database
+def restore_db(name)
+  files = Dir.glob(File.join(backup_dir, "*#{name}.mysql")).sort
+  if files.empty?
+    puts "restoring db...No db backups found for #{name}."
+    backup_db(name)    
+  else
+    file = files.last
+    puts "restoring db..."    
+    `mysql -u #{database['username']} #{database['database']} < #{file}` # restore db : mysql -h hostname -u user --password=password databasename < filename
+    puts "Restored db from #{File.basename(file)}"
+  end
+end
+
+def migration_files
+  @migration_files ||= begin
+    diff = `git diff --name-status #{@prev_sha} #{@curr_sha} | grep db/migrate`
+    files = diff.to_s.split("\n").map {|f| f.split(/\s+/) }  # => [ ['D', 'db/migrate/....'], ['A', 'db/migrate/....'] ]
+    files
+  end
+end
+
+# migration required if any db/migrate files are A or M
+def migration_required?
+  migration_files.any? {|type, file| type != 'D' }
+end
+
+def migrate_db
+  puts "migrating database..."
+  Dir.chdir(File.join(BASE_PATH, "../../"))  # rails project path
+  puts `rake db:migrate`
+ensure
+  Dir.chdir(BASE_PATH) # back to hooks path
+end
+
+# prune_backups
+# keep most oldest, plus most recent 5 backups for a given branch, delete the rest
+def prune_backups(name)
+  if files = Dir.glob(File.join(backup_dir, "*#{name}.mysql"))
+    files.sort[1..-6].each do |file| 
+      FileUtils.rm file
+      puts "Removed old backup #{File.basename(file)}"
+    end
+  end
+end
+
+def database
+  @database ||= begin
+    dbconfig = File.join(File.dirname(__FILE__), "../../config/database.yml")
+    YAML.load(File.read(dbconfig))['development']
+  end
+end
+
+def backup_dir
+  @backup_dir ||= File.join(BACKUP_PATH, database['database'])
+end
+
+def marker_file
+  File.join(backup_dir, 'current_branch')
+end
+
+
+begin  
+  validate_backup_path
+
+  prev_branch = get_previous_branch
+  curr_branch = mark_current_branch  
+  if curr_branch == prev_branch
+    puts "Branch hasn't changed, no db backup/restore required."
+  else
+    puts "Switching Branches: #{prev_branch} (#{@prev_sha}) => #{curr_branch} (#{@curr_sha})"
+    backup_db(prev_branch) if prev_branch
+  end
+  
+  if migration_files.size > 0
+    puts "Detected the following migration files changed:"
+    migration_files.each {|f| puts f.join(": ") }
+    
+    restore_db(curr_branch)
+    if migration_required?
+      migrate_db
+    else
+      puts "No migration required."
+    end
+  end
+
+  prune_backups(prev_branch)
+  prune_backups(curr_branch)
+end
