@@ -1,0 +1,34 @@
+= Gitbackup
+
+A simple post-checkout script that will backup your Rails dev database when you switch working branches.
+
+== Usage
+
+  Create a directory where backups will be store
+    $ mkdir ~/projects/backup
+  
+  Define environment variable GITBACKUP_PATH (if it's not defined, it will create and use the path ~/<your project>/../backups). 
+    $ export GITBACKUP_PATH = ~/projects/backups
+  
+  Copy the post-commit script into your github project's .git/hooks path and make it executable
+    $ cp post-checkout ~/projects/myproject/.git/hooks
+    $ chmod 755 ~/projects/myproject/.git/hooks/post-checkout
+
+  Now, when you switch branches during development, the post-checkout will run and mysqldump your database to the 
+  backup path in the following format:
+    ~/projects/backups/<dev_database_name>/2010-11-20_17:00_<branch>.mysql
+
+== How it works
+
+When run you git checkout, the post-checkout script will:
+
+  - if the new branch is different, dump the current database with the name of your previous branch
+  - if any files in /db/migrate/* are changed or added between the previous and current branch, 
+    it will run a rake db:migrate
+  - if any files in /db/migrate/* are deleted between the previous and current branch, 
+    it will restore the latest backup of the current branch name
+
+
+  
+
+
