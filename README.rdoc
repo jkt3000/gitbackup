@@ -22,11 +22,15 @@ A simple post-checkout script that will backup your Rails dev database when you 
 
 When run you git checkout, the post-checkout script will:
 
-  - if the new branch is different, dump the current database with the name of your previous branch
-  - if any files in /db/migrate/* are changed or added between the previous and current branch, 
-    it will run a rake db:migrate
-  - if any files in /db/migrate/* are deleted between the previous and current branch, 
-    it will restore the latest backup of the current branch name
+  - if prev and new branch are the same, do nothing.
+  
+  - if either branch is 'no branch', do nothing.
+  
+  - if any files in /db/migrate/* are changed (modified, added, deleted) between the previous and new branch,
+    it will save database to previous branch name, and restore back the last database of the new branch name.
+    
+  - if any files in /db/migrate/* are added or changed between the previous and new branch, 
+    it will also run a rake db:migrate
 
 
   
