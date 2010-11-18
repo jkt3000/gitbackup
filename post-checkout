@@ -11,58 +11,55 @@
 require 'fileutils'
 require 'yaml'
 
-BASE_PATH   = File.dirname(__FILE__)
-BACKUP_PATH = ENV['GITBACKUP_PATH'] || File.join(File.expand_path(BASE_PATH), "../../../backups/") # defaults to <project>/.backups/
+BASE_PATH        = File.dirname(__FILE__)
+DFLT_BACKUP_PATH = File.join(File.expand_path(BASE_PATH), "../../../backups/") # defaults to <your projects path>/backups/
+BACKUP_ROOT      = ENV['GITBACKUP_PATH'] || DFLT_BACKUP_PATH
 
 @prev_sha, @curr_sha, @branch_checkout, _ = *ARGV
 
 # validate backup path exists
-def validate_backup_path  
-  if !File.exists?(backup_dir) || !File.directory?(backup_dir)
-    FileUtils.mkdir_p backup_dir
-    if !File.exists?(backup_dir) || !File.directory?(backup_dir)
-      puts "Directory #{backup_dir} does not exist. Please make sure this directory exists."
-      exit
-    end
+def validate_backup_path
+  FileUtils.mkdir_p(backup_path) unless backup_path_exists?
+  if backup_path_exists?
+    puts "Backup path: #{backup_path}."
+  else
+    puts "Directory #{backup_path} does not exist. Please make sure this directory exists."
+    exit
   end
-  puts "Backup path: #{backup_dir}."
 end
 
-# current branch from sha
-def branch_from_sha
-  branches = `git branch --contains #{@curr_sha}`.split("\n")
-  curr = branches.find {|branch| branch.match(/^\*/) }
-  curr.gsub!(/^\W*/, "")
+# current branch name from sha
+def current_branch_from_sha
+  @current_branch_from_sha ||= begin
+    branches = `git branch --contains #{@curr_sha}`.split("\n")
+    curr = branches.find {|branch| branch.match(/^\*/) }
+    curr.gsub!(/^\W*/, "")
+  end
 end
 
-# save current branch to file and return name
 def mark_current_branch
-  branch = branch_from_sha
-  File.open(marker_file, 'w') {|f| f.write(branch) }
-  branch
+  File.open(marker_file, 'w') {|f| f.write(current_branch_from_sha) }
+  current_branch_from_sha
 end
 
-# get previous branch from marker, if exists
 def get_previous_branch
   File.exists?(marker_file) ? File.open(marker_file).read : nil
 end
 
-# backup database
 def backup_db(name)
+  return if name == 'no branch'
   puts "Backing up db..."
-  
-  backup_name = Time.now.strftime("%Y-%m-%d-%H:%M:%S_#{name}.mysql")
-  backup_file = File.join(backup_dir, backup_name)
-  results = `mysqldump #{database['database']} -u #{database['username']} --add-drop-table > #{backup_file}`
-  
-  puts "Backed up db ==> #{backup_name}"
+  backup_file = File.join(backup_path, Time.now.strftime("%Y-%m-%d-%H:%M:%S_#{name}.mysql"))
+  results     = `mysqldump #{database['database']} -u #{database['username']} --add-drop-table > #{backup_file}`  
+  puts "Backed up db ==> #{File.basename(backup_file)}"
 end
 
 # restore database
 def restore_db(name)
-  files = Dir.glob(File.join(backup_dir, "*#{name}.mysql")).sort
+  return if name == 'no branch'
+  files = backups_for(name)
   if files.empty?
-    puts "restoring db...No db backups found for #{name}."
+    puts "No db backups found for #{name}. Creating Backup now..."
     backup_db(name)    
   else
     file = files.last
@@ -96,14 +93,15 @@ end
 # prune_backups
 # keep most oldest, plus most recent 5 backups for a given branch, delete the rest
 def prune_backups(name)
-  if files = Dir.glob(File.join(backup_dir, "*#{name}.mysql"))
+  if files = Dir.glob(File.join(backup_path, "*#{name}.mysql"))
     files.sort[1..-6].each do |file| 
       FileUtils.rm file
-      puts "Removed old backup #{File.basename(file)}"
+      puts "Removed old backup #{File.basename(file)} (keeping first plus last 5)"
     end
   end
 end
 
+# rails config/database.yml
 def database
   @database ||= begin
     dbconfig = File.join(File.dirname(__FILE__), "../../config/database.yml")
@@ -111,39 +109,55 @@ def database
   end
 end
 
-def backup_dir
-  @backup_dir ||= File.join(BACKUP_PATH, database['database'])
+def backup_path
+  File.join(BACKUP_ROOT, database['database'])
 end
 
 def marker_file
-  File.join(backup_dir, 'current_branch')
+  File.join(backup_path, 'current_branch')
 end
 
+def backup_path_exists?
+  File.exists?(backup_path) && File.directory?(backup_path)
+end
+
+def backups_for(name)
+  return [] if name.nil? || name.empty?
+  Dir.glob(File.join(backup_path, "*#{name}.mysql")).sort
+end
 
 begin  
   validate_backup_path
 
   prev_branch = get_previous_branch
-  curr_branch = mark_current_branch  
+  curr_branch = mark_current_branch 
+  
+  if prev_branch == 'no branch' || curr_branch == 'no branch'
+    puts "invalid branch name..exiting"
+    exit
+  end
+
+  # check if change branches
   if curr_branch == prev_branch
-    puts "Branch hasn't changed, no db backup/restore required."
-  else
-    puts "Switching Branches: #{prev_branch} (#{@prev_sha}) => #{curr_branch} (#{@curr_sha})"
-    backup_db(prev_branch) if prev_branch
+    puts "Branch hasn't changed, no db backup/restore required. Migrate manually if needed"
+    exit
   end
   
+  # backup if no backup exists yet
+  [prev_branch, curr_branch].each do |br| 
+    backup_db(br) if backups_for(br).empty? 
+  end
+
+  puts "Switching Branches: #{prev_branch} (#{@prev_sha}) => #{curr_branch} (#{@curr_sha})"
   if migration_files.size > 0
     puts "Detected the following migration files changed:"
     migration_files.each {|f| puts f.join(": ") }
-    
+        
+    backup_db(prev_branch) if prev_branch
     restore_db(curr_branch)
-    if migration_required?
-      migrate_db
-    else
-      puts "No migration required."
-    end
+    migrate_db if migration_required?
   end
-
+  
   prune_backups(prev_branch)
   prune_backups(curr_branch)
 end
